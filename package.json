@@ -1,0 +1,25 @@
+{
+  "name": "@dsh-external/dsh-read-aloud",
+  "version": "0.0.1",
+  "description": "监听 DeepSeek 流式输出（session/event 火线），仅朗读 assistant text-delta 正常输出，经 OneCore dotnet 宿主逐句合成并由 ffplay 播放，支持关键词停止/继续/静音，失败静默降级",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "files": [
+    "lib"
+  ],
+  "license": "BSD-3-Clause",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0-rc <5",
+    "@deepseek-ai/dsh-session": ">=0.0.1-rc <2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.0"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}
