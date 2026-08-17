@@ -41,12 +41,13 @@ const __mirror = (function () {
         '.ra-wave-bar{transform-box:fill-box;transform-origin:center;animation:ra-bar-anim .9s ease-in-out infinite}',
         '.ra-speaker-glyph{transform-box:fill-box;transform-origin:center}',
         '.ra-toggle-btn.ra-on.ra-speaking .ra-speaker-glyph{animation:ra-breathe 1.15s ease-in-out infinite}',
-        // 轮尾朗读指示条
-        '.ra-turn-tail{display:inline-flex;align-items:center;gap:6px;max-width:100%;margin:6px 0 2px;padding:4px 10px;border-radius:999px;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 10%,transparent);color:var(--dsw-alias-brand-primary,#4f6ef7);font-size:12px;line-height:1.5;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 28%,transparent)}',
-        '.ra-turn-tail .ra-tt-bars{display:inline-flex;align-items:flex-end;gap:2px;height:12px;flex-shrink:0}',
-        '.ra-turn-tail .ra-tt-bar{width:2.5px;border-radius:1px;background:currentColor;animation:ra-bar-anim .8s ease-in-out infinite;transform-box:fill-box;transform-origin:bottom}',
-        '.ra-turn-tail .ra-tt-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-        '@media (prefers-reduced-motion:reduce){.ra-wave-bar,.ra-speaker-glyph,.ra-turn-tail .ra-tt-bar{animation:none!important}}',
+        // 对话栏上方朗读进度横条（conversation.input.dock）
+        '.ra-progress-bar{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:6px 12px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 8%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 22%,transparent);color:var(--dsw-alias-brand-primary,#4f6ef7);font-size:12px;line-height:1.5}',
+        '.ra-progress-bar .ra-pb-bars{display:inline-flex;align-items:flex-end;gap:2px;height:12px;flex-shrink:0}',
+        '.ra-progress-bar .ra-pb-bar{width:2.5px;border-radius:1px;background:currentColor;animation:ra-bar-anim .8s ease-in-out infinite;transform-box:fill-box;transform-origin:bottom}',
+        '.ra-progress-bar .ra-pb-label{flex-shrink:0;font-weight:600;white-space:nowrap}',
+        '.ra-progress-bar .ra-pb-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}',
+        '@media (prefers-reduced-motion:reduce){.ra-wave-bar,.ra-speaker-glyph,.ra-progress-bar .ra-pb-bar{animation:none!important}}',
       ].join('\n')
 
       // 共享朗读进度 store：按钮轮询写，turnTail 组件订阅读（避免每 turn 各轮询）
@@ -165,15 +166,11 @@ const __mirror = (function () {
         )
       }
 
-      // 轮尾朗读指示条：仅当本 turn 正在被朗读时渲染（订阅共享 store）
-      function ReadAloudTurnTail(props) {
+      // 对话栏上方朗读进度横条：仅当本会话正在朗读时渲染（订阅共享 store）
+      function ReadAloudProgressBar(props) {
         const [cur, setCur] = React.useState(readingStore.data)
-        // chain 组件：select 返回值到达 matched；owner 数据/标准 props 一并注入
-        const matched = (props && props.matched) || {}
-        const sessionId = (props && props.sessionId) || ''
-        const turnOwner = (props && props.turn) || matched.turn || {}
-        // TurnLocation.turn = 编号（非 id）；host 侧 current-sentence.turn 同源
-        const turnId = turnOwner.turn ?? turnOwner.turnId ?? -1
+        // owner props InputZone.session + standard sessionId
+        const sessionId = (props && props.session && props.session.id) || (props && props.sessionId) || ''
 
         React.useEffect(function () {
           return readingStore.subscribe(function () {
@@ -181,15 +178,16 @@ const __mirror = (function () {
           })
         }, [])
 
-        const active = cur.speaking && cur.sessionId === sessionId && Number(cur.turn) === Number(turnId)
-        if (!active || !cur.sentence) return null
-        return React.createElement('div', { className: 'ra-turn-tail', role: 'status' },
-          React.createElement('span', { className: 'ra-tt-bars', 'aria-hidden': 'true' },
-            React.createElement('span', { className: 'ra-tt-bar', style: { animationDelay: '0s' } }),
-            React.createElement('span', { className: 'ra-tt-bar', style: { animationDelay: '.15s' } }),
-            React.createElement('span', { className: 'ra-tt-bar', style: { animationDelay: '.3s' } }),
+        const active = cur.speaking && cur.sessionId === sessionId && !!cur.sentence
+        if (!active) return null
+        return React.createElement('div', { className: 'ra-progress-bar', role: 'status' },
+          React.createElement('span', { className: 'ra-pb-bars', 'aria-hidden': 'true' },
+            React.createElement('span', { className: 'ra-pb-bar', style: { animationDelay: '0s' } }),
+            React.createElement('span', { className: 'ra-pb-bar', style: { animationDelay: '.15s' } }),
+            React.createElement('span', { className: 'ra-pb-bar', style: { animationDelay: '.3s' } }),
           ),
-          React.createElement('span', { className: 'ra-tt-text' }, '🔊 ' + cur.sentence),
+          React.createElement('span', { className: 'ra-pb-label' }, '🔊 朗读中'),
+          React.createElement('span', { className: 'ra-pb-text' }, cur.sentence),
         )
       }
 
@@ -198,10 +196,10 @@ const __mirror = (function () {
       ctx.effect(() => slots.inject('conversation.input.left', function () {
         return slots.register({ name: 'conversation.input.left', id: 'read-aloud-toggle', order: 20, label: '朗读开关' }, ReadAloudButton)
       }), 'dsh-read-aloud: composer toggle')
-      // 轮尾指示条：chain 类型，select 永远返回 owner 数据（组件内部判断是否正在朗读本 turn）
-      ctx.effect(() => slots.inject('conversation.chat.turnTail', function () {
-        return slots.register({ name: 'conversation.chat.turnTail', select: function (owner) { return owner ? { turn: owner.turn, seq: owner.seq } : null } }, ReadAloudTurnTail)
-      }), 'dsh-read-aloud: turn tail')
+      // 对话栏上方朗读进度横条：list 类型，在 composer 卡上方一整行（todo/goal/queue 之下）
+      ctx.effect(() => slots.inject('conversation.input.dock', function () {
+        return slots.register({ name: 'conversation.input.dock', id: 'read-aloud-progress', order: 30, label: '朗读进度' }, ReadAloudProgressBar)
+      }), 'dsh-read-aloud: input dock progress')
     },
   }
 })()
