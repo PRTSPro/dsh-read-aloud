@@ -144,6 +144,12 @@ export function apply(ctx: AppContext, raw?: Partial<Config>): void {
   /** 每会话一个缓冲；key = session id */
   const readers = new Map<string, Reader>()
 
+  /**
+   * 当前激活会话（client 对话栏按钮上报）。非空时只朗读该会话，
+   * 多会话并存不交错混读；空（client 未上报，如无 GUI 场景）时朗读全部。
+   */
+  let activeSessionId = ''
+
   const readerFor = (session: Session): Reader => {
     let r = readers.get(session.id)
     if (!r) {
@@ -160,6 +166,8 @@ export function apply(ctx: AppContext, raw?: Partial<Config>): void {
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     // 只读主会话：子代理（subagent）会话静默
     if (session.header.origin === 'subagent') return
+    // 只读当前激活会话（client 上报）；未上报（无 GUI）时朗读全部
+    if (activeSessionId && session.id !== activeSessionId) return
 
     switch (event.type) {
       case 'assistant/chunk': {
@@ -248,11 +256,23 @@ export function apply(ctx: AppContext, raw?: Partial<Config>): void {
         if (req.method !== 'GET' && req.method !== 'POST') {
           return send(405, { ok: false, error: '仅支持 GET/POST' })
         }
-        // 消费请求体（attach data/end 监听即完成消费；当前 RPC 均无参，防 keep-alive 挂起）
-        void readBody(req)
+        // 统一消费请求体（GET 空 body 立即 resolve；POST 携带 JSON；防 keep-alive 挂起）
+        const body = await readBody(req)
         switch (rpcName) {
           case 'state':
             return send(200, { ok: true, result: stateJson() })
+          case 'set-active-session': {
+            // client 对话栏按钮上报当前会话：host 只朗读该会话
+            let sid = ''
+            try {
+              sid = String((JSON.parse(body || '{}') as Record<string, unknown>).sessionId ?? '')
+            } catch {
+              /* 解析失败视为空 */
+            }
+            activeSessionId = sid
+            log('active session set: ' + (sid || '(none → read all)'))
+            return send(200, { ok: true, result: { activeSessionId } })
+          }
           case 'toggle': {
             speaker.toggle()
             log('control: UI TOGGLE → muted=' + String(speaker.getState().paused))

@@ -45,7 +45,16 @@ const __mirror = (function () {
       ].join('\n')
 
       function ReadAloudButton(props) {
+        // owner props InputZone：当前会话快照（scope=session，切会话自动重渲染）
+        const sessionId = (props && props.session && props.session.id) || (props && props.sessionId) || ''
         const [st, setSt] = React.useState({ muted: false, speaking: false, engine: '', ok: false })
+
+        React.useEffect(function () {
+          // 上报当前会话：host 只朗读该会话（多会话并存时不交错混读）。
+          // 依赖 [sessionId]：切会话时无论重挂载还是 props 变化都会重上报。
+          // 只设置不清理——下一次挂载/切换会覆盖，天然免竞态。
+          if (sessionId) host.call('set-active-session', { sessionId }).catch(function () {})
+        }, [sessionId])
 
         React.useEffect(function () {
           let alive = true
