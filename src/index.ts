@@ -57,7 +57,7 @@ const DEFAULTS: Config = {
   rate: 1,
   hostExe: '',
   ffplay: 'ffplay',
-  maxQueue: 8,
+  maxQueue: 24,
   maxSentenceLen: 200,
   logFile: '',
   engine: 'edge',

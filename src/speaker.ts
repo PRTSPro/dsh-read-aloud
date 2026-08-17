@@ -50,9 +50,14 @@ export interface SpeakerState {
 
 const SYNTH_TIMEOUT_MS = 30_000
 const PLAY_TIMEOUT_MS = 180_000
-/** 批提交粒度：攒 3 句或 120 字一批（批内无缝；批间停顿由预合成管线消除） */
-const BATCH_SENTENCES = 3
-const BATCH_CHARS = 120
+/**
+ * 批提交粒度：攒 6 句或 180 字一批。
+ * 2026-08-17 实测校准：edge-tts 合成固定成本 ~4s/批（含 python 进程启动），
+ * 播放约 4-5 字/s——批过小（3 句短句只播 2~3s）预合成追不上 → 批间露间隔。
+ * 6 句/180 字保证每批播放 ≥6s > 合成 4s，预合成总能提前完成。
+ */
+const BATCH_SENTENCES = 6
+const BATCH_CHARS = 180
 
 /** 一批待朗读文本：text=拼接全文（整批合成用），sentences=原句（降级逐句用）。 */
 interface Batch {
@@ -171,8 +176,10 @@ export class Speaker {
       if (!this.opts.fallbackToLocal || !this.hostPath) return
     }
     if (this.queue.length >= this.opts.maxQueue) {
-      this.opts.log('queue full(' + this.queue.length + '), dropping: ' + text.slice(0, 30))
-      return
+      // 队列满：丢队头（最旧句）保新句——跟读语义 = 跟上最新内容，
+      // 而非丢新句（会让"读一半"——最新内容永久丢失，体验断裂）
+      const dropped = this.queue.shift()
+      this.opts.log('queue full(' + this.queue.length + '), dropping oldest: ' + String(dropped).slice(0, 30))
     }
     this.queue.push(text)
     void this.pump()
@@ -350,16 +357,22 @@ export class Speaker {
     return run
   }
 
-  /** 合成一批到槽文件：edge 整批合成；失败逐句降级 onecore。返回文件列表或 null。 */
+  /** 合成一批到槽文件：edge 整批合成（失败重试 1 次防网络抖动）→ 逐句降级 onecore。返回文件列表或 null。 */
   private async doSynth(batch: Batch): Promise<string[] | null> {
     if (this.engine === 'edge' && this.edgeTtsPath) {
       const file = this.nextSlotPath()
       const args = ['-t', batch.text, '-v', this.opts.edgeVoice]
       if (this.opts.edgeRate && this.opts.edgeRate !== '+0%') args.push('--rate', this.opts.edgeRate)
       args.push('--write-media', file)
-      const ok = await this.run(this.edgeTtsPath, args, SYNTH_TIMEOUT_MS, false)
+      let ok = await this.run(this.edgeTtsPath, args, SYNTH_TIMEOUT_MS, false)
+      if (!ok || !existsSync(file)) {
+        // 网络抖动/限流瞬断：重试一次再降级（edge-tts 偶发失败已实测多次）
+        this.opts.log('edge synth failed, retrying once')
+        this.tryRm(file)
+        ok = await this.run(this.edgeTtsPath, args, SYNTH_TIMEOUT_MS, false)
+      }
       if (ok && existsSync(file)) return [file]
-      this.opts.log('edge synth failed, falling back to onecore')
+      this.opts.log('edge synth failed again, falling back to onecore')
       this.tryRm(file)
     }
     if (!this.hostPath) return null

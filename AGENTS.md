@@ -43,7 +43,8 @@ dsh-read-aloud/
 7. **运行时零第三方依赖**：`cordis`/`dsh-session` 均为 `import type`（编译后擦除）；无 schemastery 运行时依赖（Config 是纯常量 DEFAULTS）。这规避了宿主 node_modules 缺失问题——不要重新引入运行时 import。
 8. **打断**：`stop()` = 清队列 + 清预合成缓冲 + `child.kill()` + `taskkill /PID /T /F`（杀进程树）+ generation 代数递增使 in-flight 失效。**只 kill 播放进程**（trackCurrent=true 的 ffplay）；合成进程短命（≤30s 超时）且结果由代数校验丢弃，不打断。
 9. **日志**：`~/.dsh/super-injector/dsh-read-aloud.log`（验证 fiber 状态与朗读触发的第一手段）。
-10. **预合成管线（批间无停顿）**：`pump()` 播放批 i 时后台预合成批 i+1——`requestSynth`（按文本复用 in-flight 任务，防双合成）+ `synthChain` 串行链（同时只跑一个合成进程）+ 双文件槽轮换（`tmpdir/dsh-ra-slot-0/1`，无扩展名 ffplay 内容探测；合成写入槽 ≠ 播放槽）。实测：3 句一批合成 4s、播放 8.4s——合成耗时被播放覆盖。首批仍要等合成（~4s），之后批间无缝。
+10. **预合成管线（批间无停顿）**：`pump()` 播放批 i 时后台预合成批 i+1——`requestSynth`（按文本复用 in-flight 任务，防双合成）+ `synthChain` 串行链（同时只跑一个合成进程）+ 双文件槽轮换（`tmpdir/dsh-ra-slot-0/1`，无扩展名 ffplay 内容探测；合成写入槽 ≠ 播放槽）。**批粒度 6 句/180 字**（2026-08-17 实测校准：edge 合成固定成本 ~4s/批含 python 启动，3 句短句只播 2~3s 会追不上 → 批间露间隔；6 句/180 字保证播放 ≥6s > 合成 4s）。edge 合成失败**重试 1 次**（防网络抖动）再逐句降级 onecore。首批仍要等合成（~4s），之后批间无缝。
+10b. **队列与跟读策略**：`maxQueue` 默认 24（输出高峰缓冲）。队列满时**丢队头（最旧句）保新句**——跟读语义 = 跟上最新内容，而非丢新句（丢新句会让最新内容永久丢失、听感"读一半"）。播放速度 ~0.36 句/s，LLM 输出 ~1.5-3 句/s，队列满不可避免，丢旧保新是设计决策。
 11. **speaking 状态（UI 动画驱动）**：`Speaker` 持有 `paused`（静音）与 `speaking`（正在出声）双布尔；**speaking 仅覆盖播放阶段**（合成不算出声），`pump()` 播放前后置位，`stop()/resume()/setEngine()` 同步更新并触发 `onState` 回调。UI 走 300ms 轮询 RPC `state`，不依赖推送。
 12. **状态持久化**：`~/.dsh/super-injector/dsh-read-aloud-state.json` 存 `{ muted, engine }`。apply 时读取恢复（Speaker 构造传 `paused`/engine），`onState` 回调里**差异写盘**（仅 muted/engine 变化时写，speaking 高频变化不落盘）。
 13. **对话栏按钮（client 半）**：注册于 `conversation.input.left` slot（list，`id: 'read-aloud-toggle'`，order 20）。三态：待命=喇叭+声波弧（品牌色 `--dsw-alias-brand-primary`）/ 朗读中=喇叭呼吸+三根音量条 CSS 波动（`.ra-wave-bar`，`prefers-reduced-motion` 降级）/ 已关闭=喇叭+斜线（灰、半透明）；host RPC 不可达降透明（offline 兜底）。CSS 以 `<style>` 元素挂组件树内，随组件卸载自动清理。

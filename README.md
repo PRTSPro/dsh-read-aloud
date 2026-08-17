@@ -55,7 +55,7 @@ dev_reload_package {"packageName": "dsh-read-aloud"}
 | `edgeVoice` | `zh-CN-XiaoxiaoNeural` | edge 音色（晓晓/晓伊/云希…） |
 | `edgeRate` | `+0%` | edge 语速（`+10%` 形式） |
 | `edgeTts` | 自动探测 | edge-tts 可执行（`~/.local/bin/edge-tts.exe` 优先）；纯合成不播放 |
-| `maxQueue` | `8` | 队列上限，超限丢新句（跟读模式） |
+| `maxQueue` | `24` | 队列上限；满时**丢最旧句保新句**（跟读跟上最新） |
 | `maxSentenceLen` | `200` | 单句强制切分上限 |
 | `fallbackToLocal` | `true` | edge 合成失败自动降级 OneCore |
 
@@ -104,7 +104,8 @@ dev_build_plugin {"dir": "<本目录>"}
 
 ## 已知限制
 
-- 首批需等合成（~4s）才出声；之后批间无缝（预合成管线）
+- 首批需等合成（~4s）才出声；之后批间无缝（预合成管线，批粒度 6 句/180 字保证播放时长 > 合成时长）
+- **跟读滞后**：LLM 输出（~2 句/s）远快于播放（~0.36 句/s），队列满（24）时丢最旧句、保最新内容——长回复会"跳读"中间部分（旧版丢新句同样跳读且丢最新）
 - edge-tts 依赖微软在线服务，断网自动降级 onecore
 - 只读实时流；表格退化为连续词朗读；超长句按 200 字强制切
 - 关键词控制依赖用户消息文本，长消息内的控制词会被忽略（防误触发）
