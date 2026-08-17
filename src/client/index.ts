@@ -41,8 +41,8 @@ const __mirror = (function () {
         '.ra-wave-bar{transform-box:fill-box;transform-origin:center;animation:ra-bar-anim .9s ease-in-out infinite}',
         '.ra-speaker-glyph{transform-box:fill-box;transform-origin:center}',
         '.ra-toggle-btn.ra-on.ra-speaking .ra-speaker-glyph{animation:ra-breathe 1.15s ease-in-out infinite}',
-        // 对话栏上方朗读进度横条（conversation.input.dock）
-        '.ra-progress-bar{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;padding:6px 12px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 8%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 22%,transparent);color:var(--dsw-alias-brand-primary,#4f6ef7);font-size:12px;line-height:1.5}',
+        // 对话栏上方朗读进度横条（conversation.input.dock）——通满 dock 宽度、左右与输入框边缘严格对齐
+        '.ra-progress-bar{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;margin:0;padding:6px 14px;border-radius:10px;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 8%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 22%,transparent);color:var(--dsw-alias-brand-primary,#4f6ef7);font-size:12px;line-height:1.5;align-self:stretch}',
         '.ra-progress-bar .ra-pb-bars{display:inline-flex;align-items:flex-end;gap:2px;height:12px;flex-shrink:0}',
         '.ra-progress-bar .ra-pb-bar{width:2.5px;border-radius:1px;background:currentColor;animation:ra-bar-anim .8s ease-in-out infinite;transform-box:fill-box;transform-origin:bottom}',
         '.ra-progress-bar .ra-pb-label{flex-shrink:0;font-weight:600;white-space:nowrap}',
