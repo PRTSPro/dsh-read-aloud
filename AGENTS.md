@@ -46,10 +46,11 @@ dsh-read-aloud/
 10. **预合成管线（批间无停顿）**：`pump()` 播放批 i 时后台预合成批 i+1——`requestSynth`（按文本复用 in-flight 任务，防双合成）+ `synthChain` 串行链（同时只跑一个合成进程）+ 双文件槽轮换（`tmpdir/dsh-ra-slot-0/1`，无扩展名 ffplay 内容探测；合成写入槽 ≠ 播放槽）。**批粒度 6 句/180 字**（2026-08-17 实测校准：edge 合成固定成本 ~4s/批含 python 启动，3 句短句只播 2~3s 会追不上 → 批间露间隔；6 句/180 字保证播放 ≥6s > 合成 4s）。edge 合成失败**重试 1 次**（防网络抖动）再逐句降级 onecore。首批仍要等合成（~4s），之后批间无缝。
 10b. **队列与跟读策略**：`maxQueue` 默认 24（输出高峰缓冲）。队列满时**丢队头（最旧句）保新句**——跟读语义 = 跟上最新内容，而非丢新句（丢新句会让最新内容永久丢失、听感"读一半"）。播放速度 ~0.36 句/s，LLM 输出 ~1.5-3 句/s，队列满不可避免，丢旧保新是设计决策。
 10c. **只读当前激活会话**：client 对话栏按钮经 RPC `set-active-session { sessionId }` 上报当前会话（props `InputZone.session.id` / `sessionId`，scope=session 随切换自动重渲染，依赖 `[sessionId]` 重上报）。host 侧 `activeSessionId` 非空时只朗读该会话（监听器过滤），空时朗读全部（回退，兼容无 GUI）。**host 无"当前会话"概念，必须 client 上报**；只上报不清理（下一次覆盖，免竞态）。
+10d. **朗读进度（轮尾指示条）**：`speak(text, meta)` 入队携带 `{ sessionId, turn }`；`pump()` 播放批前 `setReading()` 记录批句 + 字符权重 + 估算时长（`CHARS_PER_SECOND=4.5`），`getReading()` 按已播时间比例估算当前句 index。RPC `current-sentence` 返回 `{ sessionId, turn, sentences, index, sentence, speaking }`。client：按钮轮询写入共享 `readingStore`（订阅-通知），`conversation.chat.turnTail`（chain，`select` 永远返回 owner，组件内判断 `speaking && sessionId 匹配 && turn 匹配`）渲染"🔊 当前句"。**chain 组件 props**：select 返回 → `matched`；owner 数据在 `props.turn`（`TurnLocation.turn`=编号）+ 标准 props `sessionId`。
 11. **speaking 状态（UI 动画驱动）**：`Speaker` 持有 `paused`（静音）与 `speaking`（正在出声）双布尔；**speaking 仅覆盖播放阶段**（合成不算出声），`pump()` 播放前后置位，`stop()/resume()/setEngine()` 同步更新并触发 `onState` 回调。UI 走 300ms 轮询 RPC `state`，不依赖推送。
 12. **状态持久化**：`~/.dsh/super-injector/dsh-read-aloud-state.json` 存 `{ muted, engine }`。apply 时读取恢复（Speaker 构造传 `paused`/engine），`onState` 回调里**差异写盘**（仅 muted/engine 变化时写，speaking 高频变化不落盘）。
 13. **对话栏按钮（client 半）**：注册于 `conversation.input.left` slot（list，`id: 'read-aloud-toggle'`，order 20）。三态：待命=喇叭+声波弧（品牌色 `--dsw-alias-brand-primary`）/ 朗读中=喇叭呼吸+三根音量条 CSS 波动（`.ra-wave-bar`，`prefers-reduced-motion` 降级）/ 已关闭=喇叭+斜线（灰、半透明）；host RPC 不可达降透明（offline 兜底）。CSS 以 `<style>` 元素挂组件树内，随组件卸载自动清理。
-14. **host↔client RPC 契约**：host 注册 webServer 前缀路由 `/@dsh-external/dsh-read-aloud/api`（`kind: 'prefix'`，挂 `ctx.effect`）。端点：`state`（GET/POST，返回 `{ muted, speaking, engine, queue }`）、`toggle`（静音↔恢复，同关键词状态机）、`stop`、`resume`。响应信封 `{ ok, result }`；client 端 `host.call(name, args)` = fetch POST。**关键词控制与按钮走同一套 `stop()/resume()`**——二者完全等价。
+14. **host↔client RPC 契约**：host 注册 webServer 前缀路由 `/@dsh-external/dsh-read-aloud/api`（`kind: 'prefix'`，挂 `ctx.effect`）。端点：`state`（GET/POST，返回 `{ muted, speaking, engine, queue }`）、`current-sentence`（返回 `{ sessionId, turn, sentences, index, sentence, speaking }` 或 null）、`set-active-session { sessionId }`（上报当前会话）、`toggle`（静音↔恢复，同关键词状态机）、`stop`、`resume`。响应信封 `{ ok, result }`；client 端 `host.call(name, args)` = fetch POST。**关键词控制与按钮走同一套 `stop()/resume()`**——二者完全等价。
 15. **client 骨架铁律（改 UI 源必读）**：`src/client/index.ts` 是"镜像文件"——顶层 `export const inject = ['slots','timer']` + `const __mirror = (function(){ return { name, inject, apply } })()`；**`__mirror` body 必须是纯 JS（无 TS 注解）**；`slots.register({ name: 'conversation.input.left', ... })` 的 slot 名**必须写字面量**（注入器 `clientSkeletonProblems` 按字面量锚点预检）。改 UI 后必须 `dev_build_plugin`（会跑 `build:client` 重新生成 `lib/client.js`；过期产物会被注入器预检拦截）。
 
 ## 开发流程规范（每轮任务收尾必做）
@@ -103,9 +104,10 @@ dsh-read-aloud/
 
 ## 已知限制（当前版本）
 
-- 只读实时流（不读历史）；多顶层会话同时朗读会叠加（罕见场景）。
+- 只读实时流（不读历史）；**只读当前激活会话**（GUI 未加载时回退朗读全部）。
 - **首批仍需等合成（~4s）**才出声；之后批间无缝（预合成管线）。
 - edge-tts 依赖网络（微软在线服务）；断网自动降级 onecore（fallbackToLocal）。
 - 表格退化为连续词朗读；超长句按 200 字强制切。
 - 关键词控制依赖用户消息文本，长消息内的控制词会被忽略（防误触发）。
+- 轮尾指示条的"当前句"是按字符权重估算的近似（无字幕时间轴），±1 句误差。
 - 按钮/静音/引擎状态已持久化（state.json），但设置项（音色/语速/默认引擎）仍为代码常量 DEFAULTS。

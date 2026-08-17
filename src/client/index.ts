@@ -41,8 +41,33 @@ const __mirror = (function () {
         '.ra-wave-bar{transform-box:fill-box;transform-origin:center;animation:ra-bar-anim .9s ease-in-out infinite}',
         '.ra-speaker-glyph{transform-box:fill-box;transform-origin:center}',
         '.ra-toggle-btn.ra-on.ra-speaking .ra-speaker-glyph{animation:ra-breathe 1.15s ease-in-out infinite}',
-        '@media (prefers-reduced-motion:reduce){.ra-wave-bar,.ra-speaker-glyph{animation:none!important}}',
+        // 轮尾朗读指示条
+        '.ra-turn-tail{display:inline-flex;align-items:center;gap:6px;max-width:100%;margin:6px 0 2px;padding:4px 10px;border-radius:999px;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 10%,transparent);color:var(--dsw-alias-brand-primary,#4f6ef7);font-size:12px;line-height:1.5;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 28%,transparent)}',
+        '.ra-turn-tail .ra-tt-bars{display:inline-flex;align-items:flex-end;gap:2px;height:12px;flex-shrink:0}',
+        '.ra-turn-tail .ra-tt-bar{width:2.5px;border-radius:1px;background:currentColor;animation:ra-bar-anim .8s ease-in-out infinite;transform-box:fill-box;transform-origin:bottom}',
+        '.ra-turn-tail .ra-tt-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '@media (prefers-reduced-motion:reduce){.ra-wave-bar,.ra-speaker-glyph,.ra-turn-tail .ra-tt-bar{animation:none!important}}',
       ].join('\n')
+
+      // 共享朗读进度 store：按钮轮询写，turnTail 组件订阅读（避免每 turn 各轮询）
+      const readingStore = {
+        data: { sessionId: '', turn: -1, sentence: '', speaking: false },
+        listeners: new Set(),
+        set(next) {
+          const old = this.data
+          const changed = old.sessionId !== next.sessionId || old.turn !== next.turn || old.sentence !== next.sentence || old.speaking !== next.speaking
+          this.data = next
+          if (changed) {
+            const ls = [...this.listeners]
+            for (const fn of ls) { try { fn() } catch (e) { /* noop */ } }
+          }
+        },
+        subscribe(fn) {
+          this.listeners.add(fn)
+          return function () { readingStore.listeners.delete(fn) }
+        },
+      }
+
 
       function ReadAloudButton(props) {
         // owner props InputZone：当前会话快照（scope=session，切会话自动重渲染）
@@ -67,6 +92,22 @@ const __mirror = (function () {
               }
             } catch (e) {
               if (alive) setSt(function (p) { return { muted: p.muted, speaking: false, engine: p.engine, ok: false } })
+            }
+            // 朗读进度（轮尾指示条数据源）
+            try {
+              const r = await host.call('current-sentence', {})
+              if (alive && r && typeof r === 'object') {
+                readingStore.set({
+                  sessionId: String(r.sessionId || ''),
+                  turn: Number(r.turn || -1),
+                  sentence: String(r.sentence || ''),
+                  speaking: !!r.speaking,
+                })
+              } else if (alive) {
+                readingStore.set({ sessionId: '', turn: -1, sentence: '', speaking: false })
+              }
+            } catch (e) {
+              if (alive) readingStore.set({ sessionId: '', turn: -1, sentence: '', speaking: false })
             }
           }
           refresh()
@@ -124,11 +165,43 @@ const __mirror = (function () {
         )
       }
 
+      // 轮尾朗读指示条：仅当本 turn 正在被朗读时渲染（订阅共享 store）
+      function ReadAloudTurnTail(props) {
+        const [cur, setCur] = React.useState(readingStore.data)
+        // chain 组件：select 返回值到达 matched；owner 数据/标准 props 一并注入
+        const matched = (props && props.matched) || {}
+        const sessionId = (props && props.sessionId) || ''
+        const turnOwner = (props && props.turn) || matched.turn || {}
+        // TurnLocation.turn = 编号（非 id）；host 侧 current-sentence.turn 同源
+        const turnId = turnOwner.turn ?? turnOwner.turnId ?? -1
+
+        React.useEffect(function () {
+          return readingStore.subscribe(function () {
+            setCur(readingStore.data)
+          })
+        }, [])
+
+        const active = cur.speaking && cur.sessionId === sessionId && Number(cur.turn) === Number(turnId)
+        if (!active || !cur.sentence) return null
+        return React.createElement('div', { className: 'ra-turn-tail', role: 'status' },
+          React.createElement('span', { className: 'ra-tt-bars', 'aria-hidden': 'true' },
+            React.createElement('span', { className: 'ra-tt-bar', style: { animationDelay: '0s' } }),
+            React.createElement('span', { className: 'ra-tt-bar', style: { animationDelay: '.15s' } }),
+            React.createElement('span', { className: 'ra-tt-bar', style: { animationDelay: '.3s' } }),
+          ),
+          React.createElement('span', { className: 'ra-tt-text' }, '🔊 ' + cur.sentence),
+        )
+      }
+
       // fiber 卸载时 slots.inject 控制器与 register 的 effect 一并回收。
       // ⚠️ register 内 slot 名必须写字面量：注入器预检（clientSkeletonProblems）按字面量锚点识别
       ctx.effect(() => slots.inject('conversation.input.left', function () {
         return slots.register({ name: 'conversation.input.left', id: 'read-aloud-toggle', order: 20, label: '朗读开关' }, ReadAloudButton)
       }), 'dsh-read-aloud: composer toggle')
+      // 轮尾指示条：chain 类型，select 永远返回 owner 数据（组件内部判断是否正在朗读本 turn）
+      ctx.effect(() => slots.inject('conversation.chat.turnTail', function () {
+        return slots.register({ name: 'conversation.chat.turnTail', select: function (owner) { return owner ? { turn: owner.turn, seq: owner.seq } : null } }, ReadAloudTurnTail)
+      }), 'dsh-read-aloud: turn tail')
     },
   }
 })()

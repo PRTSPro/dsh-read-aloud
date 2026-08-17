@@ -80,6 +80,8 @@ const LOCAL_RE = /(用本地|用慧慧|用康康|用瑶瑶|即时档|onecore|本
 interface Reader {
   splitter: SentenceSplitter
   lastTurn: number
+  /** 当前正在输出的 turn（chunk 时更新；供朗读进度定位） */
+  currentTurn: number
 }
 
 export function apply(ctx: AppContext, raw?: Partial<Config>): void {
@@ -153,14 +155,15 @@ export function apply(ctx: AppContext, raw?: Partial<Config>): void {
   const readerFor = (session: Session): Reader => {
     let r = readers.get(session.id)
     if (!r) {
-      r = { splitter: new SentenceSplitter(config.maxSentenceLen), lastTurn: -1 }
+      r = { splitter: new SentenceSplitter(config.maxSentenceLen), lastTurn: -1, currentTurn: -1 }
       readers.set(session.id, r)
     }
     return r
   }
 
-  const out = (sentence: string): void => {
-    if (sentence.trim()) speaker.speak(sentence.trim())
+  /** 朗读一句：附带来源（会话/turn）供进度指示条定位 */
+  const out = (session: Session, reader: Reader) => (sentence: string): void => {
+    if (sentence.trim()) speaker.speak(sentence.trim(), { sessionId: session.id, turn: reader.currentTurn })
   }
 
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
@@ -173,21 +176,24 @@ export function apply(ctx: AppContext, raw?: Partial<Config>): void {
       case 'assistant/chunk': {
         const { turn, chunk } = event.data
         const reader = readerFor(session)
+        reader.currentTurn = turn
+        const o = out(session, reader)
         // 跨 turn 隔离：新 turn 开始前冲刷旧 turn 余句
         if (turn !== reader.lastTurn) {
-          reader.splitter.flush(out)
+          reader.splitter.flush(o)
           reader.lastTurn = turn
         }
         if (chunk.type === 'text-delta') {
           // 仅朗读正常输出；reasoning-delta（思维链）与工具调用一律不读
-          reader.splitter.push(chunk.text, out)
+          reader.splitter.push(chunk.text, o)
         }
         // chunk.type === 'finish'：不冲刷——同 turn 内可能有后续 step 继续输出
         break
       }
       case 'turn/end': {
         // 一轮收尾：冲刷余句（幂等）
-        readerFor(session).splitter.flush(out)
+        const reader = readerFor(session)
+        reader.splitter.flush(out(session, reader))
         break
       }
       case 'user/message': {
@@ -228,6 +234,20 @@ export function apply(ctx: AppContext, raw?: Partial<Config>): void {
     return { muted: s.paused, speaking: s.speaking, engine: s.engine, queue: s.queueLength }
   }
 
+  /** 当前朗读位置（纯 JSON 标量，供 client 轮尾指示条）。 */
+  const readingJson = (): Record<string, unknown> | null => {
+    const r = speaker.getReading()
+    if (!r) return null
+    return {
+      sessionId: r.sessionId,
+      turn: r.turn,
+      sentences: r.sentences,
+      index: r.index,
+      sentence: r.sentences[r.index] ?? '',
+      speaking: r.speaking,
+    }
+  }
+
   const readBody = (req: any): Promise<string> =>
     new Promise((resolve) => {
       let data = ''
@@ -261,6 +281,8 @@ export function apply(ctx: AppContext, raw?: Partial<Config>): void {
         switch (rpcName) {
           case 'state':
             return send(200, { ok: true, result: stateJson() })
+          case 'current-sentence':
+            return send(200, { ok: true, result: readingJson() })
           case 'set-active-session': {
             // client 对话栏按钮上报当前会话：host 只朗读该会话
             let sid = ''

@@ -48,6 +48,24 @@ export interface SpeakerState {
   queueLength: number
 }
 
+/** 句子来源元数据（用于朗读进度高亮定位所属会话/turn）。 */
+export interface SentenceMeta {
+  sessionId?: string
+  turn?: number
+}
+
+/** 当前朗读位置（供 UI 轮询 → turn 尾指示条）。 */
+export interface ReadingState {
+  sessionId: string
+  turn: number
+  sentences: string[]
+  index: number
+  speaking: boolean
+}
+
+/** 中文朗读语速估算（字/秒），用于批内进度比例。 */
+const CHARS_PER_SECOND = 4.5
+
 const SYNTH_TIMEOUT_MS = 30_000
 const PLAY_TIMEOUT_MS = 180_000
 /**
@@ -59,14 +77,15 @@ const PLAY_TIMEOUT_MS = 180_000
 const BATCH_SENTENCES = 6
 const BATCH_CHARS = 180
 
-/** 一批待朗读文本：text=拼接全文（整批合成用），sentences=原句（降级逐句用）。 */
+/** 一批待朗读文本：text=拼接全文（整批合成用），sentences=原句（降级逐句用），meta=来源定位。 */
 interface Batch {
   text: string
   sentences: string[]
+  meta: SentenceMeta
 }
 
 export class Speaker {
-  private queue: string[] = []
+  private queue: Array<{ text: string; meta: SentenceMeta }> = []
   private pumping = false
   private paused: boolean
   private disposed = false
@@ -89,6 +108,15 @@ export class Speaker {
   private synthInFlight: { text: string; promise: Promise<string[] | null> } | null = null
   /** 合成串行链：同一时刻只跑一个合成进程 */
   private synthChain: Promise<void> = Promise.resolve()
+  /** 当前朗读位置（播放中有效；供 UI 轮询 → turn 尾指示条） */
+  private reading: {
+    sessionId: string
+    turn: number
+    sentences: string[]
+    chars: number[]
+    estimatedTotalMs: number
+    playStart: number
+  } | null = null
 
   constructor(private readonly opts: SpeakerOptions) {
     this.engine = opts.engine
@@ -169,7 +197,7 @@ export class Speaker {
     }
   }
 
-  speak(text: string): void {
+  speak(text: string, meta: SentenceMeta = {}): void {
     if (this.paused || this.disposed) return
     if (this.engine === 'edge' && !this.edgeTtsPath) {
       // edge 不可用且未启用降级时直接丢弃
@@ -179,10 +207,30 @@ export class Speaker {
       // 队列满：丢队头（最旧句）保新句——跟读语义 = 跟上最新内容，
       // 而非丢新句（会让"读一半"——最新内容永久丢失，体验断裂）
       const dropped = this.queue.shift()
-      this.opts.log('queue full(' + this.queue.length + '), dropping oldest: ' + String(dropped).slice(0, 30))
+      this.opts.log('queue full(' + this.queue.length + '), dropping oldest: ' + String(dropped?.text ?? '').slice(0, 30))
     }
-    this.queue.push(text)
+    this.queue.push({ text, meta })
     void this.pump()
+  }
+
+  /** 当前朗读位置（纯 JSON 标量，供 RPC → client 轮尾指示条）。 */
+  getReading(): ReadingState | null {
+    if (!this.reading || !this.speaking || this.disposed) return null
+    const r = this.reading
+    const elapsed = Date.now() - r.playStart
+    const totalChars = r.chars.reduce((a, b) => a + b, 0)
+    const pos = totalChars > 0 ? Math.min(totalChars, Math.max(0, (elapsed / Math.max(1, r.estimatedTotalMs)) * totalChars)) : 0
+    let acc = 0
+    let index = 0
+    for (let i = 0; i < r.chars.length; i++) {
+      acc += r.chars[i]
+      if (acc >= pos) {
+        index = i
+        break
+      }
+      index = i
+    }
+    return { sessionId: r.sessionId, turn: r.turn, sentences: r.sentences, index, speaking: true }
   }
 
   /** 暂停并打断当前播放（关键词"别读了"/按钮关闭）。 */
@@ -191,6 +239,7 @@ export class Speaker {
     this.generation++
     this.queue = []
     this.clearPrebuffer()
+    this.reading = null
     this.setSpeaking(false)
     this.killCurrent()
     this.opts.log('stopped')
@@ -267,10 +316,12 @@ export class Speaker {
         // 2. 立即预合成下一批（后台，不等待——批间停顿由此消除；结果存 prebuffer）
         const next = this.peekBatch()
         if (next) void this.requestSynth(next, gen, true)
-        // 3. 播放（出声期间 UI 波动）
+        // 3. 播放（出声期间 UI 波动；记录朗读位置供轮尾指示条）
+        this.setReading(batch)
         this.setSpeaking(true)
         const ok = await this.playFiles(files, gen)
         this.setSpeaking(false)
+        this.reading = null
         this.tryRmAll(files)
         if (gen !== this.generation) return // 期间被 stop()/切引擎，放弃本轮
         if (!ok) this.opts.log('speak failed (silent)')
@@ -284,12 +335,14 @@ export class Speaker {
   private takeBatch(): Batch {
     const sentences: string[] = []
     let chars = 0
+    let meta: SentenceMeta = {}
     while (this.queue.length > 0 && sentences.length < BATCH_SENTENCES && chars < BATCH_CHARS) {
-      const t = this.queue.shift()!
-      sentences.push(t)
-      chars += t.length
+      const item = this.queue.shift()!
+      sentences.push(item.text)
+      chars += item.text.length
+      if (!meta.sessionId && item.meta.sessionId) meta = item.meta
     }
-    return { text: sentences.join(''), sentences }
+    return { text: sentences.join(''), sentences, meta }
   }
 
   /** 预取下一批（不消费队列；用于预合成）。 */
@@ -297,12 +350,26 @@ export class Speaker {
     if (this.queue.length === 0) return null
     const sentences: string[] = []
     let chars = 0
-    for (const t of this.queue) {
+    let meta: SentenceMeta = {}
+    for (const item of this.queue) {
       if (sentences.length >= BATCH_SENTENCES || chars >= BATCH_CHARS) break
-      sentences.push(t)
-      chars += t.length
+      sentences.push(item.text)
+      chars += item.text.length
+      if (!meta.sessionId && item.meta.sessionId) meta = item.meta
     }
-    return { text: sentences.join(''), sentences }
+    return { text: sentences.join(''), sentences, meta }
+  }
+
+  /** 记录当前朗读位置（批播放前调用；按句字符权重 + 估算语速推算进度）。 */
+  private setReading(batch: Batch): void {
+    this.reading = {
+      sessionId: batch.meta.sessionId ?? '',
+      turn: batch.meta.turn ?? 0,
+      sentences: batch.sentences,
+      chars: batch.sentences.map((s) => s.length),
+      estimatedTotalMs: (batch.sentences.reduce((a, s) => a + s.length, 0) / CHARS_PER_SECOND) * 1000,
+      playStart: Date.now(),
+    }
   }
 
   private takePrebuffer(text: string): string[] | null {
