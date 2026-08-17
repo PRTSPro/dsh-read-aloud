@@ -36,14 +36,15 @@ dsh-read-aloud/
 4. **控制词**：来自 `user/message` 事件，仅 `source.kind === 'user'` 且消息 ≤ 30 字符才判定
    （防正常对话误触发）。停/继续/切引擎三组正则见 `src/index.ts` 顶部。
 5. **双引擎（统一"合成到文件 → ffplay 播放"两段式）**：
-   - `onecore`：`vendor/onecore-host/onecore-host.exe <voiceSubstr> <text> <wav> [rate]` 合成 → `ffplay -nodisp -autoexit` 播放。合成 <1s。
-   - `edge`：**`edge-tts.exe -t <text> -v <voice> [--rate] --write-media <file>`** 合成 mp3 → ffplay 播放。**必须用 edge-tts（纯合成不播放）；edge-playback 会保存后自播（双音）且不支持预合成，不可作合成器**（2026-08-17 实测）。
-   - 降级链：edge 合成失败 → 逐句回落 onecore（`fallbackToLocal`），降级前/中校验代数防静音后回响。
+   - `onecore`：`vendor/onecore-host/onecore-host.exe <voiceSubstr> <text> <wav> [rate]` 合成 → `ffplay -nodisp -autoexit` 播放。**实测合成 ~5.4s（dotnet 运行时启动主导）——edge 断网时的兜底，不作首选**。
+   - `edge`：**优先走常驻合成 daemon**（`vendor/ra-synth-daemon.py`，python stdio JSON 协议：输入 `{id,text,voice,rate,out}`，输出 `{id,ok}`）——一次进程内复用 edge_tts，每次合成只承担网络 ~2s（实测 req1 1662ms / req2 2132ms；**edge-tts.exe 每次含 ~1s PyInstaller 启动，3s→2s 由此而来**）。daemon 失败 → 回退 `edge-tts.exe -t -v --rate --write-media` 重试 1 次 → 降级 onecore。
+   - **daemon 生命周期**：Speaker 构造时预热（`ensureDaemon()`，幂等复用）；`dispose()` 时 `stdin.end()` + `kill()` + **`taskkill /PID /T /F` 杀树**（venv shim + 真实解释器父子进程）；stderr 首 200 字符进日志；20s 超时。
+   - 降级链：edge（daemon→exe）失败 → 逐句回落 onecore（`fallbackToLocal`），降级前/中校验代数防静音后回响。
 6. **清洗管线**（`splitter.ts`，顺序敏感）：代码围栏 → 行内代码 → markdown 链接（角标整组删）→ 裸 URL → emoji → 箭头/竖线 → 3+ 连续符号 → 长 token（`isJunkToken` 判定，`state-of-the-art` 这类复合词保留）→ 10+ 位数字串 → **符号静音**（`RE_SILENT_SYM`：`/ （） — –` 等 → 空格，括号内容保留；`RE_HYPHEN`：`-` → 空格，拆复合词为自然词组；**放 RE_LONG_NUM 之后，不干扰 isJunkToken 对含 - / 长 token 的先行判定**）→ 行首装饰符。**标题行与下文合并**（不单独成句）。句子级过滤：<2 个字母数字整句丢弃。
 7. **运行时零第三方依赖**：`cordis`/`dsh-session` 均为 `import type`（编译后擦除）；无 schemastery 运行时依赖（Config 是纯常量 DEFAULTS）。这规避了宿主 node_modules 缺失问题——不要重新引入运行时 import。
 8. **打断**：`stop()` = 清队列 + 清预合成缓冲 + `child.kill()` + `taskkill /PID /T /F`（杀进程树）+ generation 代数递增使 in-flight 失效。**只 kill 播放进程**（trackCurrent=true 的 ffplay）；合成进程短命（≤30s 超时）且结果由代数校验丢弃，不打断。
 9. **日志**：`~/.dsh/super-injector/dsh-read-aloud.log`（验证 fiber 状态与朗读触发的第一手段）。
-10. **预合成管线（批间无停顿）**：`pump()` 播放批 i 时后台预合成批 i+1——`requestSynth`（按文本复用 in-flight 任务，防双合成）+ `synthChain` 串行链（同时只跑一个合成进程）+ 双文件槽轮换（`tmpdir/dsh-ra-slot-0/1`，无扩展名 ffplay 内容探测；合成写入槽 ≠ 播放槽）。**批粒度 6 句/180 字**（2026-08-17 实测校准：edge 合成固定成本 ~4s/批含 python 启动，3 句短句只播 2~3s 会追不上 → 批间露间隔；6 句/180 字保证播放 ≥6s > 合成 4s）。edge 合成失败**重试 1 次**（防网络抖动）再逐句降级 onecore。首批仍要等合成（~4s），之后批间无缝。
+10. **预合成管线（批间无停顿）**：`pump()` 播放批 i 时后台预合成批 i+1——`requestSynth`（按文本复用 in-flight 任务，防双合成）+ `synthChain` 串行链（同时只跑一个合成进程）+ 双文件槽轮换（`tmpdir/dsh-ra-slot-0/1`，无扩展名 ffplay 内容探测；合成写入槽 ≠ 播放槽）。**批粒度 6 句/180 字**（2026-08-17 实测校准：edge 合成固定成本 ~4s/批含 python 启动，3 句短句只播 2~3s 会追不上 → 批间露间隔；6 句/180 字保证播放 ≥6s > 合成 4s）。**首批延迟 ~2s**（daemon 预热后纯网络；断流恢复同样 ~2s），之后批间无缝。
 10b. **队列与跟读策略**：`maxQueue` 默认 24（输出高峰缓冲）。队列满时**丢队头（最旧句）保新句**——跟读语义 = 跟上最新内容，而非丢新句（丢新句会让最新内容永久丢失、听感"读一半"）。播放速度 ~0.36 句/s，LLM 输出 ~1.5-3 句/s，队列满不可避免，丢旧保新是设计决策。
 10c. **只读当前激活会话**：client 对话栏按钮经 RPC `set-active-session { sessionId }` 上报当前会话（props `InputZone.session.id` / `sessionId`，scope=session 随切换自动重渲染，依赖 `[sessionId]` 重上报）。host 侧 `activeSessionId` 非空时只朗读该会话（监听器过滤），空时朗读全部（回退，兼容无 GUI）。**host 无"当前会话"概念，必须 client 上报**；只上报不清理（下一次覆盖，免竞态）。
 10d. **朗读进度（对话栏上方横条）**：`speak(text, meta)` 入队携带 `{ sessionId, turn }`；`pump()` 播放批前 `setReading()` 记录批句 + 字符权重 + 估算时长（`CHARS_PER_SECOND=4.5`），`getReading()` 按已播时间比例估算当前句 index。RPC `current-sentence` 返回 `{ sessionId, turn, sentences, index, sentence, speaking }`。client：按钮（`input.left`）轮询写入共享 `readingStore`（订阅-通知），`conversation.input.dock`（list，order 30，composer 卡上方的整行横条，ownerProps `InputZone.session`/`sessionId`）渲染"🔊 朗读中 {当前句}"；仅当 `speaking && sessionId 匹配` 时显示，否则不渲染。
@@ -105,7 +106,7 @@ dsh-read-aloud/
 ## 已知限制（当前版本）
 
 - 只读实时流（不读历史）；**只读当前激活会话**（GUI 未加载时回退朗读全部）。
-- **首批仍需等合成（~4s）**才出声；之后批间无缝（预合成管线）。
+- **首批/断流恢复 ~2s**（edge-tts 常驻 daemon 预热后纯网络延迟）；之后批间无缝（预合成管线）。
 - edge-tts 依赖网络（微软在线服务）；断网自动降级 onecore（fallbackToLocal）。
 - 表格退化为连续词朗读；超长句按 200 字强制切。
 - 关键词控制依赖用户消息文本，长消息内的控制词会被忽略（防误触发）。

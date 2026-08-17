@@ -32,6 +32,8 @@ export interface SpeakerOptions {
   edgeRate: string
   /** edge-tts 可执行（纯合成不播放）。edge-playback 会保存后自播（双音），不可作合成器。 */
   edgeTts: string
+  /** python 可执行（edge-tts 常驻合成 daemon；空 = 探测 PATH 的 python） */
+  pythonPath?: string
   fallbackToLocal: boolean
   /** 初始静音态（持久化恢复） */
   paused?: boolean
@@ -99,6 +101,11 @@ export class Speaker {
   private hostPath: string
   private ffplayPath: string
   private edgeTtsPath: string
+  /** edge-tts 常驻合成 daemon（vendor/ra-synth-daemon.py；省进程启动，首批/断流恢复更快） */
+  private daemon: ChildProcess | null = null
+  private daemonBuf = ''
+  private daemonWaiter: { id: string; resolve: (ok: boolean) => void } | null = null
+  private daemonSeq = 0
   /** 双文件槽（无扩展名，ffplay 内容探测；合成写入槽与播放槽轮换互斥） */
   private slotPaths = [join(tmpdir(), 'dsh-ra-slot-0'), join(tmpdir(), 'dsh-ra-slot-1')]
   private slotIndex = 0
@@ -124,6 +131,9 @@ export class Speaker {
     this.hostPath = this.resolveHost()
     this.ffplayPath = opts.ffplay || 'ffplay'
     this.edgeTtsPath = this.resolveEdgeTts()
+    // 预热 edge-tts 常驻 daemon：插件加载即启动 python + import edge_tts，
+    // 首批/断流恢复合成时无需再付进程启动开销
+    if (this.engine === 'edge') this.ensureDaemon()
   }
 
   /** 尝试探测 OneCore 宿主：配置 > 插件 vendor > 已知 scratch 路径。 */
@@ -158,6 +168,94 @@ export class Speaker {
     }
     this.opts.log('WARN: edge-tts not found (edge tier disabled)')
     return ''
+  }
+
+  // ═══════════════ edge-tts 常驻合成 daemon ═══════════════
+
+  /** daemon 脚本路径（插件 vendor 目录）。 */
+  private daemonScript(): string {
+    return join(PLUGIN_ROOT, 'vendor', 'ra-synth-daemon.py')
+  }
+
+  /**
+   * 确保 daemon 存活：spawn python 常驻进程（import edge_tts 只付一次，
+   * 之后每次合成只承担网络时间 ~2s；edge-tts.exe 每次含 ~1s 启动）。
+   * apply 后首次合成前可预热：ensureDaemon 幂等，进程存活则直接复用。
+   */
+  private ensureDaemon(): boolean {
+    if (this.daemon && this.daemon.exitCode === null && !this.daemon.killed) return true
+    try {
+      const script = this.daemonScript()
+      if (!existsSync(script)) return false
+      this.daemonBuf = ''
+      this.daemonWaiter = null
+      const d = spawn(this.opts.pythonPath || 'python', [script], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+      this.daemon = d
+      d.stdout.on('data', (chunk: Buffer) => {
+        this.daemonBuf += chunk.toString('utf8')
+        let nl: number
+        while ((nl = this.daemonBuf.indexOf('\n')) !== -1) {
+          const line = this.daemonBuf.slice(0, nl)
+          this.daemonBuf = this.daemonBuf.slice(nl + 1)
+          try {
+            const msg = JSON.parse(line) as { id?: string; ok?: boolean }
+            if (this.daemonWaiter && msg.id === this.daemonWaiter.id) {
+              const w = this.daemonWaiter
+              this.daemonWaiter = null
+              w.resolve(!!msg.ok)
+            }
+          } catch {
+            /* 忽略坏行 */
+          }
+        }
+      })
+      d.stderr.on('data', (c: Buffer) => {
+        const s = c.toString('utf8').trim()
+        if (s) this.opts.log('daemon stderr: ' + s.slice(0, 200))
+      })
+      d.on('exit', () => {
+        if (this.daemon === d) this.daemon = null
+      })
+      d.on('error', () => {
+        if (this.daemon === d) this.daemon = null
+      })
+      return true
+    } catch (e) {
+      this.opts.log('daemon spawn failed: ' + String(e))
+      return false
+    }
+  }
+
+  /** 经 daemon 合成到 file（串行单请求；20s 超时）。失败返回 false（调用方走回退链）。 */
+  private synthViaDaemon(text: string, file: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (!this.ensureDaemon()) return resolve(false)
+      const id = 'r' + ++this.daemonSeq + '_' + Date.now().toString(36)
+      const timer = setTimeout(() => {
+        this.daemonWaiter = null
+        this.opts.log('daemon synth timeout: ' + text.slice(0, 20))
+        resolve(false)
+      }, 20_000)
+      this.daemonWaiter = {
+        id,
+        resolve: (ok) => {
+          clearTimeout(timer)
+          resolve(ok)
+        },
+      }
+      try {
+        this.daemon!.stdin!.write(
+          JSON.stringify({ id, text, voice: this.opts.edgeVoice, rate: this.opts.edgeRate, out: file }) + '\n',
+        )
+      } catch (e) {
+        this.daemonWaiter = null
+        clearTimeout(timer)
+        resolve(false)
+      }
+    })
   }
 
   /** 切换引擎：打断当前播放、清队列、恢复。 */
@@ -260,6 +358,29 @@ export class Speaker {
     this.stop()
     // 清理残留槽文件（播放/合成中间态）
     for (const p of this.slotPaths) this.tryRm(p)
+    // 回收 edge-tts 常驻 daemon（venv shim + 真实解释器父子树，须 /T 杀树）
+    const d = this.daemon
+    this.daemon = null
+    this.daemonWaiter = null
+    if (d) {
+      try {
+        d.stdin?.end()
+      } catch {
+        /* noop */
+      }
+      try {
+        d.kill()
+      } catch {
+        /* noop */
+      }
+      if (process.platform === 'win32' && d.pid) {
+        try {
+          spawn('taskkill', ['/PID', String(d.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+        } catch {
+          /* noop */
+        }
+      }
+    }
   }
 
   private clearPrebuffer(): void {
@@ -424,22 +545,38 @@ export class Speaker {
     return run
   }
 
-  /** 合成一批到槽文件：edge 整批合成（失败重试 1 次防网络抖动）→ 逐句降级 onecore。返回文件列表或 null。 */
+  /** 合成一批到槽文件：edge 常驻 daemon（失败 → exe 重试 1 次）→ 逐句降级 onecore。返回文件列表或 null。 */
   private async doSynth(batch: Batch): Promise<string[] | null> {
-    if (this.engine === 'edge' && this.edgeTtsPath) {
+    if (this.engine === 'edge' && (this.edgeTtsPath || this.daemonScript())) {
       const file = this.nextSlotPath()
-      const args = ['-t', batch.text, '-v', this.opts.edgeVoice]
-      if (this.opts.edgeRate && this.opts.edgeRate !== '+0%') args.push('--rate', this.opts.edgeRate)
-      args.push('--write-media', file)
-      let ok = await this.run(this.edgeTtsPath, args, SYNTH_TIMEOUT_MS, false)
-      if (!ok || !existsSync(file)) {
-        // 网络抖动/限流瞬断：重试一次再降级（edge-tts 偶发失败已实测多次）
-        this.opts.log('edge synth failed, retrying once')
+      const t0 = Date.now()
+      // 1) 常驻 daemon：省进程启动（首批/断流恢复更快）
+      let ok = await this.synthViaDaemon(batch.text, file)
+      if (ok && !existsSync(file)) {
+        // daemon 声称成功但文件未落盘：视为失败
+        ok = false
         this.tryRm(file)
+      }
+      if (ok) {
+        this.opts.log('edge synth via daemon OK (' + (Date.now() - t0) + 'ms)')
+        return [file]
+      }
+      // 2) exe 兜底：重试 1 次防网络抖动
+      if (this.edgeTtsPath) {
+        this.opts.log('edge daemon synth failed, retrying via exe')
+        this.tryRm(file)
+        const args = ['-t', batch.text, '-v', this.opts.edgeVoice]
+        if (this.opts.edgeRate && this.opts.edgeRate !== '+0%') args.push('--rate', this.opts.edgeRate)
+        args.push('--write-media', file)
         ok = await this.run(this.edgeTtsPath, args, SYNTH_TIMEOUT_MS, false)
+        if (!ok || !existsSync(file)) {
+          this.opts.log('edge exe synth failed, retrying once')
+          this.tryRm(file)
+          ok = await this.run(this.edgeTtsPath, args, SYNTH_TIMEOUT_MS, false)
+        }
       }
       if (ok && existsSync(file)) return [file]
-      this.opts.log('edge synth failed again, falling back to onecore')
+      this.opts.log('edge synth failed, falling back to onecore')
       this.tryRm(file)
     }
     if (!this.hostPath) return null
