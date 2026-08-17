@@ -5,6 +5,7 @@
  * - 非文本清洗管线（防止 TTS 机械式逐字符朗读）：
  *   ① ``` 代码围栏剔除（状态机，可跨 chunk）② 行内 `code` ③ markdown 链接只留文字
  *   ④ 裸 URL ⑤ emoji ⑥ 箭头 ⑦ 表格竖线 ⑧ 连续符号串 ⑨ 长英文/路径标识符 ⑩ 长数字串
+ *   ⑪ 符号静音：/ （） - — – 等单个符号 → 空格（TTS 不读"斜杠/括号/减号"）
  *   最后：行首 markdown 装饰符清理 + 句子级过滤（无实质文字则丢弃）
  */
 
@@ -26,6 +27,15 @@ const RE_SYMBOL_RUN = /[^\p{L}\p{N}\s]{3,}/gu
 const RE_LONG_TOKEN = /[A-Za-z0-9][A-Za-z0-9_.\-/\\:]{15,}/g
 /** 长数字串（时间戳/ID ≥10 位）→ 删 */
 const RE_LONG_NUM = /\d{10,}/g
+/**
+ * 符号静音 → 空格：TTS 不读"斜杠/括号/减号"这类符号。
+ * 括号内容保留（"（见上文）"读成"见上文"），只静音符号本身。
+ * - 括号（中英文）、斜杠、破折号（em/en dash，含 2 连 —— 不在 3+ 规则内）
+ * - ASCII 连字符/横线：拆复合词为自然词组（state-of-the-art → state of the art）
+ * 放在 RE_LONG_NUM 之后：不干扰 isJunkToken 对含 - / 长 token 的先行判定。
+ */
+const RE_SILENT_SYM = /[()（）/—–‒]/g
+const RE_HYPHEN = /-/g
 
 /**
  * 长串是否为 TTS 垃圾（逐字符朗读会机械）：
@@ -152,6 +162,8 @@ export class SentenceSplitter {
       .replace(RE_SYMBOL_RUN, ' ')
       .replace(RE_LONG_TOKEN, (t) => (isJunkToken(t) ? ' ' : t))
       .replace(RE_LONG_NUM, ' ')
+      .replace(RE_SILENT_SYM, ' ')
+      .replace(RE_HYPHEN, ' ')
 
     // 行首装饰符（逐行）+ 保留换行供切句使用
     // 标题行（# 开头）与下文合并成一句，消除"标题 → 正文"的句间停顿

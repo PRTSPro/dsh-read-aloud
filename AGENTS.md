@@ -39,7 +39,7 @@ dsh-read-aloud/
    - `onecore`：`vendor/onecore-host/onecore-host.exe <voiceSubstr> <text> <wav> [rate]` 合成 → `ffplay -nodisp -autoexit` 播放。合成 <1s。
    - `edge`：**`edge-tts.exe -t <text> -v <voice> [--rate] --write-media <file>`** 合成 mp3 → ffplay 播放。**必须用 edge-tts（纯合成不播放）；edge-playback 会保存后自播（双音）且不支持预合成，不可作合成器**（2026-08-17 实测）。
    - 降级链：edge 合成失败 → 逐句回落 onecore（`fallbackToLocal`），降级前/中校验代数防静音后回响。
-6. **清洗管线**（`splitter.ts`，顺序敏感）：代码围栏 → 行内代码 → markdown 链接（角标整组删）→ 裸 URL → emoji → 箭头/竖线 → 3+ 连续符号 → 长 token（`isJunkToken` 判定，`state-of-the-art` 这类复合词保留）→ 10+ 位数字串 → 行首装饰符。**标题行与下文合并**（不单独成句）。句子级过滤：<2 个字母数字整句丢弃。
+6. **清洗管线**（`splitter.ts`，顺序敏感）：代码围栏 → 行内代码 → markdown 链接（角标整组删）→ 裸 URL → emoji → 箭头/竖线 → 3+ 连续符号 → 长 token（`isJunkToken` 判定，`state-of-the-art` 这类复合词保留）→ 10+ 位数字串 → **符号静音**（`RE_SILENT_SYM`：`/ （） — –` 等 → 空格，括号内容保留；`RE_HYPHEN`：`-` → 空格，拆复合词为自然词组；**放 RE_LONG_NUM 之后，不干扰 isJunkToken 对含 - / 长 token 的先行判定**）→ 行首装饰符。**标题行与下文合并**（不单独成句）。句子级过滤：<2 个字母数字整句丢弃。
 7. **运行时零第三方依赖**：`cordis`/`dsh-session` 均为 `import type`（编译后擦除）；无 schemastery 运行时依赖（Config 是纯常量 DEFAULTS）。这规避了宿主 node_modules 缺失问题——不要重新引入运行时 import。
 8. **打断**：`stop()` = 清队列 + 清预合成缓冲 + `child.kill()` + `taskkill /PID /T /F`（杀进程树）+ generation 代数递增使 in-flight 失效。**只 kill 播放进程**（trackCurrent=true 的 ffplay）；合成进程短命（≤30s 超时）且结果由代数校验丢弃，不打断。
 9. **日志**：`~/.dsh/super-injector/dsh-read-aloud.log`（验证 fiber 状态与朗读触发的第一手段）。
