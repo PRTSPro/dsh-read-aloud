@@ -11,22 +11,24 @@ DeepSeek Harness（DSH）对话实时朗读插件（**hybrid：host 朗读引擎
 - ✅ **只读当前打开的会话**：对话栏按钮自动上报当前会话，多会话并存时不交错混读
 - ✅ **朗读进度横条**：对话栏上方显示一条"🔊 朗读中 {当前句}"，随朗读滚动，与输入区一体
 - ✅ **状态持久化**：静音/引擎选择存 `~/.dsh/super-injector/dsh-read-aloud-state.json`，host 重启自动恢复
-- ✅ **自动装配**：已 `dev_install_package` 进 profile bundles，DSH 重启后自动加载（无需再注入）
+- ✅ **标准装配**：host 半由 profile `cordis.patch.yml` 的 `- insert` 装载，client 半由 client-modules 自动装载——重启/热重载自动加载，无需注入器
 - ✅ 关键词控制：别读了 / 继续朗读 / 切换音色引擎
 - ✅ 失败静默降级（edge 断网自动回落本地），绝不干扰对话本身
 
 ## 快速开始
 
 ```text
-# DSH 注入器环境内（super-injector 通道）
-dev_build_plugin  {"dir": "<本目录>"}
-dev_inject_plugin {"dir": "<本目录>"}          # 运行时注入（本机已装配进 profile，重启自动加载）
+# 标准 profile 装配（无需注入器；本机已在 ~/.dsh/profiles/web/cordis.patch.yml 配置）
+# host 半：- insert { id: dsh-read-aloud, name: '@dsh-external/dsh-read-aloud' }
+# client 半：client-modules 按 package.json 的 dsh.client 声明自动装载
 
-# 改代码后热重载（免重注入；client 改动浏览器需刷新一次页面）
-dev_build_plugin  {"dir": "<本目录>"}
-dev_reload_package {"packageName": "dsh-read-aloud"}
+# 构建（host + client 双产物）
+npm run build          # host：scripts/build.sh（WSL bash + tsc，src/ → lib/index.js）
+npm run build:client   # client：build-client.mjs → lib/client.js（ModuleLoader bundle）
+npm pack               # 发布/分发用 → *.tgz
 
-# 已执行过 dev_install_package：dsh.profile.bundles 已含本包，DSH 重启后自动装配
+# 改代码后生效：host 需重启 DSH（node .../@deepseek-ai/dsh/lib/bin.js web）；
+# client 重建后浏览器刷新一次（pnpm run dev:web watcher 在跑则 HMR 联动）
 ```
 
 依赖：Windows + dotnet 9 运行时（OneCore 宿主）+ 本机 `ffplay` + `edge-tts`（`~/.local/bin/edge-tts.exe`，edge 档）。
@@ -97,13 +99,12 @@ AGENTS.md          Agent 开发指引（架构事实 Hub）
 ## 构建（host + client 双产物）
 
 ```text
-dev_build_plugin {"dir": "<本目录>"}
-#  → scripts/build.sh 编译 host：src/ → lib/index.js
-#  → npm run build:client（scripts/build-client.mjs）→ lib/client.js（ModuleLoader bundle）
-#  → npm pack → *.tgz
+npm run build          # → scripts/build.sh 编译 host：src/ → lib/index.js
+npm run build:client   # → lib/client.js（ModuleLoader bundle）
+npm pack               # → *.tgz
 ```
 
-`lib/client.js` 由 `src/client/index.ts` 抽取生成：文件顶层保留 `export const inject = ['slots','timer']` + `const __mirror = ...` 镜像（供注入器 client 骨架预检锚点），`build-client.mjs` 提取 `__mirror` 内 body 包裹进 `window.__ModuleLoader__.load({ id, factory })`。**改 UI 源后必须重跑 `dev_build_plugin`**（lib/client.js 过期会被注入器构建预检拦截）。
+`lib/client.js` 由 `src/client/index.ts` 抽取生成：文件顶层保留 `export const inject = ['slots','timer']` + `const __mirror = ...` 镜像（供构建预检锚点），`build-client.mjs` 提取 `__mirror` 内 body 包裹进 `window.__ModuleLoader__.load({ id, factory })`。**改 UI 源后必须重跑 `npm run build:client`**（否则 client bundle 过期）。
 
 ## 已知限制
 

@@ -52,7 +52,7 @@ dsh-read-aloud/
 12. **状态持久化**：`~/.dsh/super-injector/dsh-read-aloud-state.json` 存 `{ muted, engine }`。apply 时读取恢复（Speaker 构造传 `paused`/engine），`onState` 回调里**差异写盘**（仅 muted/engine 变化时写，speaking 高频变化不落盘）。
 13. **对话栏按钮（client 半）**：注册于 `conversation.input.left` slot（list，`id: 'read-aloud-toggle'`，order 20）。三态：待命=喇叭+声波弧（品牌色 `--dsw-alias-brand-primary`）/ 朗读中=喇叭呼吸+三根音量条 CSS 波动（`.ra-wave-bar`，`prefers-reduced-motion` 降级）/ 已关闭=喇叭+斜线（灰、半透明）；host RPC 不可达降透明（offline 兜底）。CSS 以 `<style>` 元素挂组件树内，随组件卸载自动清理。
 14. **host↔client RPC 契约**：host 注册 webServer 前缀路由 `/@dsh-external/dsh-read-aloud/api`（`kind: 'prefix'`，挂 `ctx.effect`）。端点：`state`（GET/POST，返回 `{ muted, speaking, engine, queue }`）、`current-sentence`（返回 `{ sessionId, turn, sentences, index, sentence, speaking }` 或 null）、`set-active-session { sessionId }`（上报当前会话）、`toggle`（静音↔恢复，同关键词状态机）、`stop`、`resume`。响应信封 `{ ok, result }`；client 端 `host.call(name, args)` = fetch POST。**关键词控制与按钮走同一套 `stop()/resume()`**——二者完全等价。
-15. **client 骨架铁律（改 UI 源必读）**：`src/client/index.ts` 是"镜像文件"——顶层 `export const inject = ['slots','timer']` + `const __mirror = (function(){ return { name, inject, apply } })()`；**`__mirror` body 必须是纯 JS（无 TS 注解）**；`slots.register({ name: 'conversation.input.left', ... })` 的 slot 名**必须写字面量**（注入器 `clientSkeletonProblems` 按字面量锚点预检）。改 UI 后必须 `dev_build_plugin`（会跑 `build:client` 重新生成 `lib/client.js`；过期产物会被注入器预检拦截）。
+15. **client 骨架铁律（改 UI 源必读）**：`src/client/index.ts` 是"镜像文件"——顶层 `export const inject = ['slots','timer']` + `const __mirror = (function(){ return { name, inject, apply } })()`；**`__mirror` body 必须是纯 JS（无 TS 注解）**；`slots.register({ name: 'conversation.input.left', ... })` 的 slot 名**必须写字面量**（`build-client.mjs` 按字面量锚点预检）。改 UI 后必须 `npm run build:client` 重新生成 `lib/client.js`（过期产物会被预检拦截）。
 
 ## 开发流程规范（每轮任务收尾必做）
 
@@ -70,25 +70,28 @@ dsh-read-aloud/
 - 推送网络：本机 GitHub 走 Clash Verge 代理 127.0.0.1:7897（git 全局已配 `http.proxy` + `http.sslBackend=openssl`，无需额外参数）；直连 HTTPS 会被 TLS 重置，勿尝试。
 - 提交信息风格：`<类型>: <一句话>`（如 `feat: 预合成管线消除批间停顿`、`docs: 记录开发流程规范`）。
 
-## 构建 / 注入 / 热重载（DSH 注入器工具，由 agent 调用）
+## 构建 / 装配 / 生效（标准 profile 装载；super-injector 已移除，勿用 dev_* 工具）
 
 ```text
-改代码 → dev_build_plugin {"dir": "<本目录>"}      # ① WSL bash 跑 scripts/build.sh（host tsc）
-                                                  # ② npm run build:client（build-client.mjs → lib/client.js）
-                                                  # ③ npm pack → tgz
-      → dev_reload_package {"packageName": "dsh-read-aloud"}   # 热重载（免重注入）
+改代码 → npm run build           # ① host：bash scripts/build.sh（WSL，tsc，src/ → lib/index.js）
+      → npm run build:client     # ② client：build-client.mjs → lib/client.js（ModuleLoader bundle）
+      → npm pack                 # ③ 打 tgz（发布/分发用）
 ```
 
-- 重载返回必须看到 `client ✓ (lib/client.js)`；若报 `client ✗`，先查 `clientStatus` 报错路径。
-- **client-modules pkgMeta 负缓存**（2026-08-17 踩坑）：包在**未声明 dsh.client** 时被扫描过 → `clientModules.pkgMeta` 缓存 null（进程级永久）→ 补上 client 声明后重载仍报 client ✗。注入器 `refreshClientRow` 已加清缓存自愈（无需人工处理）；若再次遇到，检查 `D:\DS-Task\injector-release\lib\index.js` 的该函数是否被回退。
-- 已注入状态：junction `C:\Users\17151\.dsh\profiles\web\node_modules\@dsh-external\dsh-read-aloud` → 本目录。
-- 重新注入：`dev_uninject_plugin {"match": "dsh-read-aloud"}` → `dev_inject_plugin {"dir": "<本目录>"}`。
-- 检查状态：`dev_plugin_status`（找 `@dsh-external/dsh-read-aloud [injected]`）+ 读日志文件尾部。
+- 装配（已在 profile 配置，通常无需再动）：
+  - host 半：`~/.dsh/profiles/web/cordis.patch.yml` → `- insert: { id: dsh-read-aloud, name: '@dsh-external/dsh-read-aloud' }`
+  - client 半：client-modules 按 `package.json` 的 `dsh.client` 声明自动装载（浏览器刷新一次生效）
+  - 链接：junction `C:\Users\17151\.dsh\profiles\web\node_modules\@dsh-external\dsh-read-aloud` → 本目录
+- 生效方式：
+  - 只改 `cordis.patch.yml`：profile patch 有热监听（watchUserPatches），保存即热重装配，**无需重启**。
+  - 改 host 代码（`lib/index.js`）：需**重启 DSH**（`node .../@deepseek-ai/dsh/lib/bin.js web`）才会重新加载。
+  - 改 client 源：重跑 `npm run build:client` 后**浏览器刷新一次**；`pnpm run dev:web` watcher 在跑则 HMR 联动。
+- 状态检查：读日志尾部（`~/.dsh/super-injector/dsh-read-aloud.log`——目录名沿袭历史，插件仍写此处）+ RPC 冒烟（见下）。
 - 浏览器页面：client bundle 经 HMR 联动，但**新增 UI 后需刷新一次页面**才能看到按钮（首装场景）。
 
 ### build.sh 环境坑（已踩平，勿回退）
 
-- dev_build_plugin 内 bash 是 **WSL**（`HOME=/root`，无 USERPROFILE）；探测用户目录顺序：`USERPROFILE → HOME → /mnt/c/Users/* → /c/Users/*`。
+- scripts/build.sh 内 bash 是 **WSL**（`HOME=/root`，无 USERPROFILE）；探测用户目录顺序：`USERPROFILE → HOME → /mnt/c/Users/* → /c/Users/*`。
 - checkout 探测：源码形态（`packages/`）→ npx cache 形态（`node_modules/@deepseek-ai/dsh-session`），优先 hash `1e7f6d9597241db0`（本机运行中的 harness）。
 - tsc 定位：checkout 内无 typescript（pnpm 布局），从**任意 npx cache** 找 `node_modules/typescript/lib/tsc.js`，用 `node tsc.js` 跑（绕开 .bin interop）。
 - 依赖链接用 **scoped 包名**（`@deepseek-ai/cordis`、`@deepseek-ai/schemastery`、`@deepseek-ai/dsh-session`…）。WSL 建的是 Linux symlink，Windows 侧无效属正常（仅编译期用；运行时零第三方依赖所以无所谓）。
@@ -99,7 +102,7 @@ dsh-read-aloud/
 - 切句/清洗自测：`node D:\DS-Task\.scratch\test-splitter.mjs`（样例脚本，可追加用例；也可放 `.scratch` 下）。
 - 端到端：插件生效期间让模型回复，读日志确认 `read-aloud ready`（含 muted 恢复态）/ `engine switched` / `edge synth failed` 降级记录；听感由用户确认（预合成后批间应无停顿）。
 - RPC 冒烟（host 半）：`Invoke-RestMethod -Uri 'http://127.0.0.1:3080/@dsh-external/dsh-read-aloud/api/state' -Method Post -ContentType 'application/json' -Body '{}'` → 应返回 `{ ok: true, result: { muted, speaking, engine, queue } }`；`toggle` 应翻转 muted 并打断播放；**toggle 后检查 `~/.dsh/super-injector/dsh-read-aloud-state.json` 已更新**。
-- client 半验证：`dev_reload_package` 返回 `client ✓ (lib/client.js)`；浏览器刷新后输入栏左侧出现喇叭按钮；朗读中图标波动；点击切换。
+- client 半验证：`npm run build:client` 成功产出 `lib/client.js`；浏览器刷新后输入栏左侧出现喇叭按钮；朗读中图标波动；点击切换（host 未运行时按钮呈 offline 降透明）。
 - 合成链路裸测：`edge-tts.exe -t 测试 -v zh-CN-XiaoxiaoNeural --write-media <tmp>` 应 exit 0 且文件 >0 字节（**合成不发声**）；`ffplay -nodisp -autoexit <tmp>` 应出声且 exit 0。
 - 预合成时序参考：3 句一批合成 ~4s、播放 ~8.4s——播放可覆盖合成，批间无缝成立。
 
